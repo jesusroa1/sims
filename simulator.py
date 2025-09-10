@@ -1,158 +1,237 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
-from typing import Optional, Tuple, List, Dict
-
-import numpy as np
-import pandas as pd
+from typing import List, Optional
 
 
 @dataclass
-class SimulationConfig:
-    # Simulation horizon
-    hours: float = 24.0
-    tick_minutes: int = 1  # discrete time step in minutes
+class Order:
+    """Represents a single customer order moving through the warehouse."""
 
-    # SLA for on-time definition (hours)
-    sla_hours: float = 4.0
-
-    # Arrivals (orders/hour) ~ Normal(mean, std)
-    arrival_rate_mean_per_hour: float = 300.0
-    arrival_rate_std_per_hour: float = 60.0
-
-    # Picking capacity (orders/hour) ~ Normal(mean, std)
-    pick_rate_mean_per_hour: float = 300.0
-    pick_rate_std_per_hour: float = 60.0
-
-    # Random seed for reproducibility (optional)
-    seed: Optional[int] = 42
+    id: str
+    created_tick: int
+    stage: str = "NEW"
+    complete_tick: Optional[int] = None
 
 
-def _draw_nonnegative_int_normal(mean: float, std: float, rng: np.random.Generator) -> int:
-    # Draw a single normal, convert to int counts (round to nearest), clamp to >= 0
-    val = rng.normal(loc=mean, scale=std)
-    # Round to nearest integer; if std is 0, val is deterministic
-    count = int(np.rint(val))
-    return max(0, count)
+@dataclass
+class Employee:
+    """Simple worker who can handle one order at a time."""
+
+    id: int
+    current_order: Optional[Order] = None
+    time_remaining: int = 0
+
+    @property
+    def idle(self) -> bool:
+        return self.current_order is None
 
 
-def simulate(config: SimulationConfig) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Run the warehouse simulation.
+class WarehouseSimulation:
+    """Discrete-event simulation for a tiny warehouse workflow."""
 
-    Returns:
-        tick_df: Per-tick metrics DataFrame with arrivals, capacity, picked, backlog, etc.
-        orders_df: Per-order records with creation/pick times, dwell, on_time flag.
-    """
-    if config.seed is not None:
-        rng = np.random.default_rng(config.seed)
-    else:
-        rng = np.random.default_rng()
+    STAGE_DURATIONS = {"PICK": 5, "STAGE": 3, "SHIP": 4}
 
-    total_minutes = int(config.hours * 60)
-    sla_minutes = int(config.sla_hours * 60)
+    def __init__(self, num_employees: int = 8, seed: Optional[int] = None, sla_minutes: int = 240) -> None:
+        self.rng = random.Random(seed)
+        self.employees: List[Employee] = [Employee(i) for i in range(num_employees)]
+        self.new_orders: List[Order] = []
+        self.completed_orders: List[Order] = []
+        self.tick: int = 0
+        self.next_order_num: int = 1000
+        self.sla_minutes = sla_minutes
 
-    # Convert per-hour rates to per-tick (per-minute) rates
-    arrival_mean_per_tick = config.arrival_rate_mean_per_hour / 60.0
-    arrival_std_per_tick = config.arrival_rate_std_per_hour / 60.0
-    pick_mean_per_tick = config.pick_rate_mean_per_hour / 60.0
-    pick_std_per_tick = config.pick_rate_std_per_hour / 60.0
+    # ------------------------------------------------------------------
+    # Simulation mechanics
+    # ------------------------------------------------------------------
+    def _generate_order_id(self) -> str:
+        oid = f"A{self.next_order_num}"
+        self.next_order_num += 1
+        return oid
 
-    # State: FIFO queue of order creation times (in minutes)
-    queue: List[int] = []
+    def step(self) -> None:
+        """Advance the simulation by one minute."""
+        # Random arrivals (roughly 0.7 orders per minute)
+        if self.rng.random() < 0.7:
+            order = Order(self._generate_order_id(), self.tick)
+            self.new_orders.append(order)
 
-    # Per-order records we will populate when orders are picked
-    order_created_times: List[int] = []
-    order_picked_times: List[int] = []
+        # Progress work on current orders
+        for emp in self.employees:
+            if emp.current_order:
+                emp.time_remaining -= 1
+                if emp.time_remaining <= 0:
+                    order = emp.current_order
+                    if order.stage == "PICK":
+                        order.stage = "STAGE"
+                        emp.time_remaining = self.STAGE_DURATIONS["STAGE"]
+                    elif order.stage == "STAGE":
+                        order.stage = "SHIP"
+                        emp.time_remaining = self.STAGE_DURATIONS["SHIP"]
+                    elif order.stage == "SHIP":
+                        order.stage = "COMPLETE"
+                        order.complete_tick = self.tick
+                        self.completed_orders.append(order)
+                        emp.current_order = None
 
-    # Per-tick metrics
-    rows: List[Dict] = []
-    cumulative_arrived = 0
-    cumulative_picked = 0
-    cumulative_on_time = 0
+        # Assign idle employees to new work
+        for emp in self.employees:
+            if emp.idle and self.new_orders:
+                order = self.new_orders.pop(0)
+                order.stage = "PICK"
+                emp.current_order = order
+                emp.time_remaining = self.STAGE_DURATIONS["PICK"]
 
-    # Simulate minute-by-minute
-    for minute in range(0, total_minutes, config.tick_minutes):
-        # Arrivals this tick
-        arrivals = _draw_nonnegative_int_normal(arrival_mean_per_tick, arrival_std_per_tick, rng)
-        for _ in range(arrivals):
-            queue.append(minute)
-        cumulative_arrived += arrivals
+        self.tick += 1
 
-        # Capacity this tick
-        capacity = _draw_nonnegative_int_normal(pick_mean_per_tick, pick_std_per_tick, rng)
+    def run(self, ticks: int) -> None:
+        for _ in range(ticks):
+            self.step()
 
-        # Serve FIFO queue up to capacity
-        picked_this_tick = 0
-        on_time_this_tick = 0
-        dwell_times: List[int] = []
-        while picked_this_tick < capacity and queue:
-            created_min = queue.pop(0)
-            dwell = minute - created_min
-            dwell_times.append(dwell)
-            order_created_times.append(created_min)
-            order_picked_times.append(minute)
-            picked_this_tick += 1
-            cumulative_picked += 1
-            if dwell <= sla_minutes:
-                on_time_this_tick += 1
-                cumulative_on_time += 1
+    # ------------------------------------------------------------------
+    # Helpers for rendering
+    # ------------------------------------------------------------------
+    def _clock(self) -> str:
+        h = self.tick // 60
+        m = self.tick % 60
+        return f"{h:02d}:{m:02d}"
 
-        backlog = len(queue)
-        effective_throughput_per_hour = (cumulative_picked / max((minute + 1), 1)) * 60.0
+    def _stage_lists(self):
+        pick, stage, ship = [], [], []
+        for e in self.employees:
+            o = e.current_order
+            if o:
+                if o.stage == "PICK":
+                    pick.append(o)
+                elif o.stage == "STAGE":
+                    stage.append(o)
+                elif o.stage == "SHIP":
+                    ship.append(o)
+        return pick, stage, ship
 
-        # Running average dwell time among picked so far
-        if len(order_created_times) > 0:
-            avg_dwell_so_far = np.mean(np.array(order_picked_times) - np.array(order_created_times))
+    def _metrics(self):
+        done = len(self.completed_orders)
+        if done:
+            on_time = sum(1 for o in self.completed_orders if (o.complete_tick - o.created_tick) <= self.sla_minutes)
+            on_time_pct = on_time / done * 100
+            avg_wait = sum(o.complete_tick - o.created_tick for o in self.completed_orders) / done
+            orders_per_hr = done / max(self.tick / 60, 1e-9)
         else:
-            avg_dwell_so_far = np.nan
+            on_time_pct = 0.0
+            avg_wait = 0.0
+            orders_per_hr = 0.0
+        lane_q = len(self.new_orders)
+        return on_time_pct, orders_per_hr, avg_wait, lane_q, self._clock()
 
-        on_time_pct_cum = (cumulative_on_time / cumulative_picked * 100.0) if cumulative_picked > 0 else np.nan
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+    def render(self, max_display: int = 6) -> str:
+        """Return an ASCII Kanban board for the current state."""
+        pick, stage, ship = self._stage_lists()
+        on_time, oph, avg_wait, lane_q, clock = self._metrics()
 
-        rows.append(
-            {
-                "tick_min": minute,
-                "arrivals": arrivals,
-                "capacity": capacity,
-                "picked": picked_this_tick,
-                "backlog": backlog,
-                "cum_arrivals": cumulative_arrived,
-                "cum_picked": cumulative_picked,
-                "cum_on_time": cumulative_on_time,
-                "on_time_pct_cum": on_time_pct_cum,
-                "avg_dwell_min_cum": avg_dwell_so_far,
-                "effective_throughput_per_hour": effective_throughput_per_hour,
-            }
-        )
+        width = 84
+        inner = width - 2
 
-    tick_df = pd.DataFrame(rows)
+        def border() -> str:
+            return "+" + "-" * inner + "+"
 
-    # Build per-order DataFrame
-    if order_created_times:
-        od = pd.DataFrame(
-            {
-                "created_min": order_created_times,
-                "picked_min": order_picked_times,
-            }
-        )
-        od["dwell_min"] = od["picked_min"] - od["created_min"]
-        od["on_time"] = od["dwell_min"] <= sla_minutes
-        orders_df = od
-    else:
-        orders_df = pd.DataFrame(columns=["created_min", "picked_min", "dwell_min", "on_time"])  # empty
+        def fmt_line(text: str) -> str:
+            return "|" + text.ljust(inner) + "|"
 
-    return tick_df, orders_df
+        lines: List[str] = []
+        lines.append(border())
+        kpi = f"KPI BAR: {on_time:5.1f}% | {oph:9.1f} | {avg_wait:8.1f} | {lane_q:6d} | {clock}"
+        lines.append(fmt_line(kpi))
+        lines.append(border())
+        emp_bar = "EMPLOYEES:  " + " ".join("[o]" if e.idle else "[ ]" for e in self.employees)
+        lines.append(fmt_line(emp_bar))
+        lines.append(border())
+        lines.append("")  # blank line
 
+        headers = [
+            " NEW ORDERS   ",
+            "   PICK        ",
+            "   STAGE       ",
+            "   SHIP        ",
+            "   COMPLETE    ",
+        ]
+        col_widths = [14, 15, 15, 15, 15]
+        header_content = "|".join(headers) + "|"
+        lines.append(fmt_line(header_content))
+        separators = [
+            "--------------",
+            "---------------",
+            "---------------",
+            "---------------",
+            "---------------",
+        ]
+        sep_content = "|".join(separators) + "|"
+        lines.append(fmt_line(sep_content))
 
-def default_run() -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Convenience: run with default config and return DataFrames."""
-    cfg = SimulationConfig()
-    return simulate(cfg)
+        columns = [self.new_orders, pick, stage, ship, self.completed_orders]
+        stage_names = ["NEW", "PICK", "STAGE", "SHIP", "COMPLETE"]
 
+        def box_top(width: int) -> str:
+            return " +" + "-" * 10 + "+" + " " * (width - 13)
 
-if __name__ == "__main__":
-    tdf, odf = default_run()
-    # Print quick summary
-    print("Per-tick metrics (head):")
-    print(tdf.head())
-    print("\nPer-order records (head):")
-    print(odf.head())
+        def box_content(text: str, width: int) -> str:
+            return " |" + text + "|" + " " * (width - 13)
+
+        def order_text(order: Order, stage: str) -> str:
+            if stage == "NEW":
+                return order.id.center(10)
+            elif stage == "COMPLETE":
+                return " " + f"[*] {order.id}".ljust(9)
+            else:
+                return " " + f"[o] {order.id}".ljust(9)
+
+        for idx in range(max_display):
+            # top border
+            cells = []
+            for col, w in zip(columns, col_widths):
+                cells.append(box_top(w) if len(col) > idx else " " * w)
+            lines.append(fmt_line("|".join(cells) + "|"))
+
+            # content
+            cells = []
+            for col, w, stage in zip(columns, col_widths, stage_names):
+                if len(col) > idx:
+                    text = order_text(col[idx], stage)
+                    cells.append(box_content(text, w))
+                else:
+                    cells.append(" " * w)
+            lines.append(fmt_line("|".join(cells) + "|"))
+
+            # bottom border
+            cells = []
+            for col, w in zip(columns, col_widths):
+                cells.append(box_top(w) if len(col) > idx else " " * w)
+            lines.append(fmt_line("|".join(cells) + "|"))
+
+        # blank row
+        blank = "|".join(" " * w for w in col_widths) + "|"
+        lines.append(fmt_line(blank))
+
+        # Overflow indicators (two lines)
+        extra_new = max(len(self.new_orders) - max_display, 0)
+        extra_complete = max(len(self.completed_orders) - max_display, 0)
+
+        line1_cells: List[str] = []
+        line2_cells: List[str] = []
+        for idx, w in enumerate(col_widths):
+            if idx == 0 and extra_new > 0:
+                line1_cells.append(f" ({extra_new} more".ljust(w))
+                line2_cells.append(" orders...)".ljust(w))
+            elif idx == 4 and extra_complete > 0:
+                line1_cells.append(f" ({extra_complete} more".ljust(w))
+                line2_cells.append(" complete...)".ljust(w))
+            else:
+                line1_cells.append(" " * w)
+                line2_cells.append(" " * w)
+        lines.append(fmt_line("|".join(line1_cells) + "|"))
+        lines.append(fmt_line("|".join(line2_cells) + "|"))
+
+        return "\n".join(lines)

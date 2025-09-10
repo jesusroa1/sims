@@ -2,11 +2,36 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Warehouse Simulation</title>
+    <title>Order Simulation</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <h1>Warehouse Simulation</h1>
+    <h1>Order Simulation</h1>
+    <div id="controls">
+      <label>
+        Orders/day
+        <input id="ordersPerDay" type="number" min="0" step="1" value="500" />
+      </label>
+      <label>
+        Days
+        <input id="days" type="number" min="1" step="1" value="30" />
+      </label>
+      <label>
+        Employees
+        <input id="employees" type="number" min="1" step="1" value="8" />
+      </label>
+      <label>
+        Minutes/order
+        <input id="minutesPerOrder" type="number" min="1" step="1" value="12" />
+      </label>
+      <label>
+        Speed (min/s)
+        <input id="minutesPerSecond" type="number" min="1" step="1" value="180" />
+      </label>
+      <button id="startBtn">Start</button>
+      <button id="resetBtn">Reset</button>
+    </div>
+    <canvas id="chart" width="900" height="240" aria-label="Orders per day chart"></canvas>
     <pre id="board"></pre>
     <script src="sim.js"></script>
   </body>

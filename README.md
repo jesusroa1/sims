@@ -27,3 +27,18 @@ The output shows:
 
 This simulation is a starting point for experimenting with warehouse flow and
 visualising state in a terminal‑friendly format.
+
+## Web App
+
+A static browser-based view is provided in `docs/index.html`.  Serve the folder
+locally (for example with Python's built-in web server) and open the page in
+your browser:
+
+```bash
+python -m http.server
+# then visit http://localhost:8000/docs/
+```
+
+The page runs the same simulation in JavaScript and renders the ASCII board in
+an HTML `<pre>` block, closely matching the mock‑ups in
+`docs/output_visuals.md`.

@@ -1,4 +1,4 @@
-// Simple RNG with seed (Mulberry32) for reproducibility
+// Simple RNG (Mulberry32)
 function makeRng(seed) {
   let t = seed >>> 0;
   return function () {
@@ -9,240 +9,221 @@ function makeRng(seed) {
   };
 }
 
-// Box-Muller transform for normal distribution
-function randn(rng) {
-  let u = 0, v = 0;
-  while (u === 0) u = rng();
-  while (v === 0) v = rng();
-  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+class Order {
+  constructor(id, createdTick) {
+    this.id = id;
+    this.createdTick = createdTick;
+    this.stage = "NEW";
+    this.completeTick = null;
+  }
 }
 
-function drawNonnegativeIntNormal(mean, std, rng) {
-  if (std <= 0) return Math.max(0, Math.round(mean));
-  const val = mean + std * randn(rng);
-  return Math.max(0, Math.round(val));
+class Employee {
+  constructor(id) {
+    this.id = id;
+    this.currentOrder = null;
+    this.timeRemaining = 0;
+  }
+  get idle() {
+    return this.currentOrder === null;
+  }
 }
 
-class Simulator {
-  constructor(cfg) {
-    this.cfg = cfg;
-    this.minute = 0;
-    this.queue = []; // array of orders { id, created }
-    this.picked = []; // array of orders { id, created, picked, dwell, onTime }
-    this.nextId = 1;
-    this.cumArrived = 0;
-    this.cumPicked = 0;
-    this.cumOnTime = 0;
-    this.rng = makeRng(cfg.seed >>> 0);
-    this.backlogPoints = []; // [{x: minute, y: backlog}]
+class WarehouseSimulation {
+  constructor(numEmployees = 8, seed = 42, slaMinutes = 240) {
+    this.rng = makeRng(seed);
+    this.employees = Array.from({ length: numEmployees }, (_, i) => new Employee(i));
+    this.newOrders = [];
+    this.completedOrders = [];
+    this.tick = 0;
+    this.nextOrderNum = 1000;
+    this.slaMinutes = slaMinutes;
+  }
+
+  _generateOrderId() {
+    return "A" + this.nextOrderNum++;
   }
 
   step() {
-    const slaMin = this.cfg.slaHours * 60;
-    const arriveMeanTick = this.cfg.arriveMean / 60.0;
-    const arriveStdTick = this.cfg.arriveStd / 60.0;
-    const pickMeanTick = this.cfg.pickMean / 60.0;
-    const pickStdTick = this.cfg.pickStd / 60.0;
-
-    // Arrivals
-    const arrivals = drawNonnegativeIntNormal(arriveMeanTick, arriveStdTick, this.rng);
-    for (let i = 0; i < arrivals; i++) {
-      this.queue.push({ id: this.nextId++, created: this.minute });
-    }
-    this.cumArrived += arrivals;
-
-    // Capacity
-    const capacity = drawNonnegativeIntNormal(pickMeanTick, pickStdTick, this.rng);
-
-    // Serve FIFO up to capacity
-    let pickedThisTick = 0;
-    while (pickedThisTick < capacity && this.queue.length > 0) {
-      const ord = this.queue.shift();
-      const dwell = this.minute - ord.created;
-      const onTime = dwell <= slaMin;
-      this.picked.push({ id: ord.id, created: ord.created, picked: this.minute, dwell, onTime });
-      this.cumPicked++;
-      if (onTime) this.cumOnTime++;
-      pickedThisTick++;
+    if (this.rng() < 0.7) {
+      this.newOrders.push(new Order(this._generateOrderId(), this.tick));
     }
 
-    const backlog = this.queue.length;
-    this.backlogPoints.push({ x: this.minute, y: backlog });
+    for (const emp of this.employees) {
+      if (emp.currentOrder) {
+        emp.timeRemaining -= 1;
+        if (emp.timeRemaining <= 0) {
+          const order = emp.currentOrder;
+          if (order.stage === "PICK") {
+            order.stage = "STAGE";
+            emp.timeRemaining = 3;
+          } else if (order.stage === "STAGE") {
+            order.stage = "SHIP";
+            emp.timeRemaining = 4;
+          } else if (order.stage === "SHIP") {
+            order.stage = "COMPLETE";
+            order.completeTick = this.tick;
+            this.completedOrders.push(order);
+            emp.currentOrder = null;
+          }
+        }
+      }
+    }
 
-    const throughput = this.minute > 0 ? (this.cumPicked / this.minute) * 60.0 : 0;
-    const onTimePct = this.cumPicked > 0 ? (this.cumOnTime / this.cumPicked) * 100.0 : NaN;
+    for (const emp of this.employees) {
+      if (emp.idle && this.newOrders.length) {
+        const ord = this.newOrders.shift();
+        ord.stage = "PICK";
+        emp.currentOrder = ord;
+        emp.timeRemaining = 5;
+      }
+    }
 
-    const metrics = {
-      minute: this.minute,
-      arrivals,
-      capacity,
-      pickedThisTick,
-      backlog,
-      cumPicked: this.cumPicked,
-      onTimePct,
-      throughput,
+    this.tick += 1;
+  }
+
+  run(ticks) {
+    for (let i = 0; i < ticks; i++) this.step();
+  }
+
+  _clock() {
+    const h = Math.floor(this.tick / 60);
+    const m = this.tick % 60;
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  }
+
+  _stageLists() {
+    const pick = [], stage = [], ship = [];
+    for (const e of this.employees) {
+      const o = e.currentOrder;
+      if (o) {
+        if (o.stage === "PICK") pick.push(o);
+        else if (o.stage === "STAGE") stage.push(o);
+        else if (o.stage === "SHIP") ship.push(o);
+      }
+    }
+    return [pick, stage, ship];
+  }
+
+  _metrics() {
+    const done = this.completedOrders.length;
+    let onTimePct = 0, avgWait = 0, oph = 0;
+    if (done) {
+      let onTime = 0, totalWait = 0;
+      for (const o of this.completedOrders) {
+        const dwell = o.completeTick - o.createdTick;
+        if (dwell <= this.slaMinutes) onTime++;
+        totalWait += dwell;
+      }
+      onTimePct = (onTime / done) * 100;
+      avgWait = totalWait / done;
+      oph = done / Math.max(this.tick / 60, 1e-9);
+    }
+    const laneQ = this.newOrders.length;
+    return [onTimePct, oph, avgWait, laneQ, this._clock()];
+  }
+
+  render(maxDisplay = 6) {
+    const [pick, stage, ship] = this._stageLists();
+    const [onTime, oph, avgWait, laneQ, clock] = this._metrics();
+    const width = 84;
+    const inner = width - 2;
+    const border = () => "+" + "-".repeat(inner) + "+";
+    const fmt = (t) => "|" + t.padEnd(inner) + "|";
+    const lines = [];
+    lines.push(border());
+    const kpi = `KPI BAR: ${onTime.toFixed(1).padStart(5)}% | ${oph.toFixed(1).padStart(9)} | ${avgWait.toFixed(1).padStart(8)} | ${String(laneQ).padStart(6)} | ${clock}`;
+    lines.push(fmt(kpi));
+    lines.push(border());
+    const empBar = "EMPLOYEES:  " + this.employees.map(e => e.idle ? "[o]" : "[ ]").join(" ");
+    lines.push(fmt(empBar));
+    lines.push(border());
+    lines.push("");
+
+    const headers = [
+      " NEW ORDERS   ",
+      "   PICK        ",
+      "   STAGE       ",
+      "   SHIP        ",
+      "   COMPLETE    ",
+    ];
+    const colWidths = [14, 15, 15, 15, 15];
+    lines.push(fmt(headers.join("|") + "|"));
+    const seps = [
+      "--------------",
+      "---------------",
+      "---------------",
+      "---------------",
+      "---------------",
+    ];
+    lines.push(fmt(seps.join("|") + "|"));
+
+    const columns = [this.newOrders, pick, stage, ship, this.completedOrders];
+    const stageNames = ["NEW", "PICK", "STAGE", "SHIP", "COMPLETE"];
+
+    const boxTop = (w) => " +----------+" + " ".repeat(w - 13);
+    const boxContent = (text, w) => " |" + text + "|" + " ".repeat(w - 13);
+    const center = (text, width) => {
+      const left = Math.floor((width - text.length) / 2);
+      const right = width - text.length - left;
+      return " ".repeat(left) + text + " ".repeat(right);
+    };
+    const orderText = (o, stage) => {
+      if (stage === "NEW") return center(o.id, 10);
+      if (stage === "COMPLETE") return ("[*] " + o.id).padEnd(10);
+      return ("[o] " + o.id).padEnd(10);
     };
 
-    this.minute += 1;
-    return metrics;
-  }
-}
-
-// --- UI wiring ---
-const els = {
-  startPauseBtn: document.getElementById('startPauseBtn'),
-  stepBtn: document.getElementById('stepBtn'),
-  resetBtn: document.getElementById('resetBtn'),
-  speedMs: document.getElementById('speedMs'),
-  hours: document.getElementById('hours'),
-  slaHours: document.getElementById('slaHours'),
-  seed: document.getElementById('seed'),
-  arriveMean: document.getElementById('arriveMean'),
-  arriveStd: document.getElementById('arriveStd'),
-  pickMean: document.getElementById('pickMean'),
-  pickStd: document.getElementById('pickStd'),
-  tickMin: document.getElementById('tickMin'),
-  backlog: document.getElementById('backlog'),
-  cumPicked: document.getElementById('cumPicked'),
-  onTimePct: document.getElementById('onTimePct'),
-  throughput: document.getElementById('throughput'),
-  queueTableBody: document.querySelector('#queueTable tbody'),
-  pickedTableBody: document.querySelector('#pickedTable tbody'),
-  backlogCanvas: document.getElementById('backlogChart'),
-};
-
-let sim = null;
-let timer = null;
-
-function readConfig() {
-  return {
-    hours: parseFloat(els.hours.value),
-    slaHours: parseFloat(els.slaHours.value),
-    seed: parseInt(els.seed.value || '42', 10),
-    arriveMean: parseFloat(els.arriveMean.value),
-    arriveStd: parseFloat(els.arriveStd.value),
-    pickMean: parseFloat(els.pickMean.value),
-    pickStd: parseFloat(els.pickStd.value),
-  };
-}
-
-function resetSim() {
-  sim = new Simulator(readConfig());
-  updateUI({ minute: 0, arrivals: 0, capacity: 0, pickedThisTick: 0, backlog: 0, cumPicked: 0, onTimePct: NaN, throughput: 0 });
-  renderTables();
-  renderChart();
-}
-
-function startPause() {
-  if (!timer) {
-    els.startPauseBtn.textContent = 'Pause';
-    const totalMinutes = Math.round(sim.cfg.hours * 60);
-    timer = setInterval(() => {
-      const metrics = sim.step();
-      updateUI(metrics);
-      renderTables();
-      renderChart();
-      if (sim.minute >= totalMinutes) {
-        pauseTimer();
+    for (let idx = 0; idx < maxDisplay; idx++) {
+      let cells = [];
+      for (let c = 0; c < columns.length; c++) {
+        cells.push(columns[c].length > idx ? boxTop(colWidths[c]) : " ".repeat(colWidths[c]));
       }
-    }, Math.max(1, parseInt(els.speedMs.value || '100', 10)));
-  } else {
-    pauseTimer();
+      lines.push(fmt(cells.join("|") + "|"));
+
+      cells = [];
+      for (let c = 0; c < columns.length; c++) {
+        if (columns[c].length > idx) {
+          const txt = orderText(columns[c][idx], stageNames[c]);
+          cells.push(boxContent(txt, colWidths[c]));
+        } else {
+          cells.push(" ".repeat(colWidths[c]));
+        }
+      }
+      lines.push(fmt(cells.join("|") + "|"));
+
+      cells = [];
+      for (let c = 0; c < columns.length; c++) {
+        cells.push(columns[c].length > idx ? boxTop(colWidths[c]) : " ".repeat(colWidths[c]));
+      }
+      lines.push(fmt(cells.join("|") + "|"));
+    }
+
+    const blank = colWidths.map(w => " ".repeat(w)).join("|") + "|";
+    lines.push(fmt(blank));
+
+    const extraNew = Math.max(this.newOrders.length - maxDisplay, 0);
+    const extraComplete = Math.max(this.completedOrders.length - maxDisplay, 0);
+    let line1 = [], line2 = [];
+    for (let i = 0; i < colWidths.length; i++) {
+      if (i === 0 && extraNew > 0) {
+        line1.push(` (${extraNew} more`.padEnd(colWidths[i]));
+        line2.push(" orders...)".padEnd(colWidths[i]));
+      } else if (i === 4 && extraComplete > 0) {
+        line1.push(` (${extraComplete} more`.padEnd(colWidths[i]));
+        line2.push(" complete...)".padEnd(colWidths[i]));
+      } else {
+        line1.push(" ".repeat(colWidths[i]));
+        line2.push(" ".repeat(colWidths[i]));
+      }
+    }
+    lines.push(fmt(line1.join("|") + "|"));
+    lines.push(fmt(line2.join("|") + "|"));
+
+    return lines.join("\n");
   }
 }
 
-function pauseTimer() {
-  clearInterval(timer);
-  timer = null;
-  els.startPauseBtn.textContent = 'Start';
-}
-
-function stepOnce() {
-  const totalMinutes = Math.round(sim.cfg.hours * 60);
-  if (sim.minute >= totalMinutes) return;
-  const metrics = sim.step();
-  updateUI(metrics);
-  renderTables();
-  renderChart();
-}
-
-function updateUI(m) {
-  els.tickMin.textContent = m.minute;
-  els.backlog.textContent = m.backlog;
-  els.cumPicked.textContent = m.cumPicked;
-  els.onTimePct.textContent = isNaN(m.onTimePct) ? '—' : m.onTimePct.toFixed(1) + '%';
-  els.throughput.textContent = m.throughput.toFixed(1);
-}
-
-function renderTables() {
-  // Queue: show up to 100 most recent waiting orders (by created desc)
-  const now = sim.minute;
-  const q = sim.queue.slice(-100).map(o => ({ id: o.id, created: o.created, dwell: now - o.created }))
-                      .sort((a,b) => b.created - a.created);
-  const qRows = q.map(o => `<tr><td>${o.id}</td><td>${o.created}</td><td>${o.dwell}</td></tr>`).join('');
-  els.queueTableBody.innerHTML = qRows;
-
-  // Picked: show up to 100 most recent picked orders (by picked desc)
-  const p = sim.picked.slice(-100).slice().sort((a,b) => b.picked - a.picked);
-  const pRows = p.map(o => `<tr><td>${o.id}</td><td>${o.created}</td><td>${o.picked}</td><td>${o.dwell}</td><td class="${o.onTime ? 'ontime' : 'late'}">${o.onTime ? 'On-time' : 'Late'}</td></tr>`).join('');
-  els.pickedTableBody.innerHTML = pRows;
-}
-
-function renderChart() {
-  const ctx = els.backlogCanvas.getContext('2d');
-  const W = els.backlogCanvas.width;
-  const H = els.backlogCanvas.height;
-  ctx.clearRect(0, 0, W, H);
-
-  // Axes
-  ctx.strokeStyle = '#334155';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(40, 10);
-  ctx.lineTo(40, H - 20);
-  ctx.lineTo(W - 10, H - 20);
-  ctx.stroke();
-
-  const pts = sim.backlogPoints;
-  if (pts.length < 2) return;
-
-  const minX = pts[0].x;
-  const maxX = pts[pts.length - 1].x || 1;
-  let maxY = 1;
-  for (const p of pts) maxY = Math.max(maxY, p.y);
-
-  const plotX = (x) => 40 + ((x - minX) / Math.max(1, (maxX - minX))) * (W - 50);
-  const plotY = (y) => (H - 20) - (y / Math.max(1, maxY)) * (H - 30);
-
-  // Line
-  ctx.strokeStyle = '#22c55e';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(plotX(pts[0].x), plotY(pts[0].y));
-  for (let i = 1; i < pts.length; i++) {
-    ctx.lineTo(plotX(pts[i].x), plotY(pts[i].y));
-  }
-  ctx.stroke();
-
-  // Labels
-  ctx.fillStyle = '#9ca3af';
-  ctx.font = '12px system-ui, sans-serif';
-  ctx.fillText('Backlog', 46, 20);
-}
-
-// Hook up events
-els.startPauseBtn.addEventListener('click', startPause);
-els.stepBtn.addEventListener('click', stepOnce);
-els.resetBtn.addEventListener('click', () => { pauseTimer(); resetSim(); });
-els.speedMs.addEventListener('change', () => {
-  if (timer) { pauseTimer(); startPause(); }
-});
-
-// Reset whenever params change (so runs are reproducible with given seed)
-for (const id of ['hours','slaHours','seed','arriveMean','arriveStd','pickMean','pickStd']) {
-  document.getElementById(id).addEventListener('change', () => { pauseTimer(); resetSim(); });
-}
-
-// Init
-resetSim();
-
+const sim = new WarehouseSimulation();
+sim.run(360);
+document.getElementById("board").textContent = sim.render();

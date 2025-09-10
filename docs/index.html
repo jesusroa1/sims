@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Warehouse Simulation</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Warehouse Simulation</h1>
+      <p>Watch orders flow from arrival to picking. FIFO, normally distributed arrivals and capacity.</p>
+    </header>
+
+    <section class="controls">
+      <div class="control-row">
+        <button id="startPauseBtn">Start</button>
+        <button id="stepBtn">Step</button>
+        <button id="resetBtn">Reset</button>
+        <label>Speed (ms/tick): <input id="speedMs" type="number" min="1" step="50" value="100" /></label>
+      </div>
+      <div class="params">
+        <div>
+          <label>Hours: <input id="hours" type="number" step="0.5" value="8" /></label>
+          <label>SLA (hours): <input id="slaHours" type="number" step="0.5" value="4" /></label>
+          <label>Seed: <input id="seed" type="number" value="42" /></label>
+        </div>
+        <div>
+          <label>Arrivals mean (orders/hr): <input id="arriveMean" type="number" value="320" /></label>
+          <label>Arrivals std (orders/hr): <input id="arriveStd" type="number" value="80" /></label>
+        </div>
+        <div>
+          <label>Pick mean (orders/hr): <input id="pickMean" type="number" value="300" /></label>
+          <label>Pick std (orders/hr): <input id="pickStd" type="number" value="60" /></label>
+        </div>
+      </div>
+    </section>
+
+    <section class="metrics">
+      <div class="metric"><span class="label">Time (min):</span> <span id="tickMin">0</span></div>
+      <div class="metric"><span class="label">Backlog:</span> <span id="backlog">0</span></div>
+      <div class="metric"><span class="label">Picked (cum):</span> <span id="cumPicked">0</span></div>
+      <div class="metric"><span class="label">On-time % (cum):</span> <span id="onTimePct">—</span></div>
+      <div class="metric"><span class="label">Eff. Throughput (orders/hr):</span> <span id="throughput">0</span></div>
+    </section>
+
+    <section class="charts">
+      <canvas id="backlogChart" width="900" height="200"></canvas>
+    </section>
+
+    <main class="tables">
+      <section>
+        <h2>Queue (Waiting Orders)</h2>
+        <table id="queueTable">
+          <thead>
+            <tr><th>ID</th><th>Created (min)</th><th>Dwell (min)</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="hint">Showing up to 100 most recent waiting orders.</div>
+      </section>
+      <section>
+        <h2>Picked Orders</h2>
+        <table id="pickedTable">
+          <thead>
+            <tr><th>ID</th><th>Created</th><th>Picked</th><th>Dwell</th><th>On-time</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="hint">Showing up to 100 most recent picked orders.</div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Static site (GitHub Pages-ready). Simulation runs entirely in your browser.</p>
+    </footer>
+
+    <script src="sim.js"></script>
+  </body>
+  </html>
+
